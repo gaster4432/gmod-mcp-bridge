@@ -75,13 +75,21 @@ async def agent_poll():
 # ---- GMod posts results here ----
 @app.post("/agent/result")
 async def agent_result(request: Request):
+    from urllib.parse import parse_qs
+
+    raw_body = await request.body()
+    body = raw_body.decode("utf-8", "replace")
     ctype = request.headers.get("content-type", "")
     data: Any = None
+
     if "application/json" in ctype:
-        data = await request.json()
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = None
     else:
-        form = await request.form()
-        raw = form.get("payload")
+        params = parse_qs(body)
+        raw = (params.get("payload") or [None])[0]
         if raw:
             try:
                 data = json.loads(raw)
