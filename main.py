@@ -1,10 +1,11 @@
 import os
 import json
-import uuid
+import time
 import asyncio
-from typing import Dict
+from collections import deque
+from typing import Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -30,45 +31,74 @@ TOOLS = [
 
 VALID_TOOLS = {t["name"] for t in TOOLS}
 
-# ---- Agent connection state ----
-connected_agents: Dict[str, WebSocket] = {}
-pending_calls: Dict[str, asyncio.Future] = {}
+# ---- Agent state. The GMod server polls us; we never connect to it. ----
+command_queue: deque = deque()
+pending_calls: Dict[Any, asyncio.Future] = {}
+last_poll_ts: float = 0.0
+poll_count: int = 0
+POLL_TIMEOUT = 5.0  # seconds without a poll before we call the agent offline
+
+
+def agent_online() -> bool:
+    return (time.time() - last_poll_ts) < POLL_TIMEOUT
 
 
 @app.get("/")
 async def root():
-    return {"service": "gmod-mcp-bridge", "version": "2.0.0", "online": len(connected_agents) > 0}
+    return {"service": "gmod-mcp-bridge", "version": "2.1.0", "online": agent_online()}
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "online": len(connected_agents) > 0, "agents": len(connected_agents)}
+    return {
+        "ok": True,
+        "online": agent_online(),
+        "agents": 1 if agent_online() else 0,
+        "polls": poll_count,
+        "queued": len(command_queue),
+        "last_poll": last_poll_ts,
+    }
 
 
-# ---- WebSocket: GMod agent connects here ----
-@app.websocket("/ws/agent")
-async def agent_ws(websocket: WebSocket):
-    await websocket.accept()
-    agent_id = str(uuid.uuid4())
-    connected_agents[agent_id] = websocket
-    print(f"[agent] connected: {agent_id}")
-    try:
-        while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            msg_id = msg.get("id")
-            if msg_id and msg_id in pending_calls:
-                future = pending_calls.pop(msg_id)
-                if not future.done():
-                    if msg.get("ok"):
-                        future.set_result(msg.get("result"))
-                    else:
-                        future.set_exception(Exception(msg.get("error", "agent tool failed")))
-    except WebSocketDisconnect:
-        pass
-    finally:
-        connected_agents.pop(agent_id, None)
-        print(f"[agent] disconnected: {agent_id}")
+# ---- GMod polls this for work ----
+@app.get("/agent/poll")
+async def agent_poll():
+    global last_poll_ts, poll_count
+    last_poll_ts = time.time()
+    poll_count += 1
+    if command_queue:
+        cmd = command_queue.popleft()
+        return {"event": cmd}
+    return {"event": None}
+
+
+# ---- GMod posts results here ----
+@app.post("/agent/result")
+async def agent_result(request: Request):
+    ctype = request.headers.get("content-type", "")
+    data: Any = None
+    if "application/json" in ctype:
+        data = await request.json()
+    else:
+        form = await request.form()
+        raw = form.get("payload")
+        if raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = None
+
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "bad payload"}, status_code=400)
+
+    rid = data.get("id")
+    fut = pending_calls.pop(rid, None)
+    if fut is not None and not fut.done():
+        if data.get("ok"):
+            fut.set_result(data.get("result"))
+        else:
+            fut.set_exception(Exception(data.get("error") or data.get("result") or "agent tool failed"))
+    return {"ok": True}
 
 
 # ---- MCP: ChatGPT connects here ----
@@ -89,7 +119,7 @@ async def mcp(request_body: dict):
             "result": {
                 "protocolVersion": protocol,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "gmod-mcp-bridge", "version": "2.0.0"},
+                "serverInfo": {"name": "gmod-mcp-bridge", "version": "2.1.0"},
             },
         }
 
@@ -109,21 +139,19 @@ async def mcp(request_body: dict):
                 status_code=400,
             )
 
-        if not connected_agents:
+        if not agent_online():
             return JSONResponse(
                 {"jsonrpc": "2.0", "id": req_id, "result": {
-                    "content": [{"type": "text", "text": "Error: No GMod agent connected. Start the server and run gmbridge_connect."}],
+                    "content": [{"type": "text", "text": "Error: GMod agent is not polling. Check that the server is running and gmbridge_status shows polls > 0."}],
                     "isError": True,
                 }},
             )
 
-        agent_id, ws = next(iter(connected_agents.items()))
         future = asyncio.get_running_loop().create_future()
         pending_calls[req_id] = future
+        command_queue.append({"id": req_id, "tool": tool_name, "args": args})
 
-        payload = {"id": req_id, "tool": tool_name, "args": args}
         try:
-            await ws.send_text(json.dumps(payload))
             result = await asyncio.wait_for(future, timeout=30.0)
             return {
                 "jsonrpc": "2.0",
@@ -134,7 +162,7 @@ async def mcp(request_body: dict):
             pending_calls.pop(req_id, None)
             return JSONResponse(
                 {"jsonrpc": "2.0", "id": req_id, "result": {
-                    "content": [{"type": "text", "text": "Error: tool call timed out waiting for GMod agent"}],
+                    "content": [{"type": "text", "text": "Error: tool call timed out; the GMod agent picked it up but never posted a result. Check the server console for a Lua error."}],
                     "isError": True,
                 }},
             )
