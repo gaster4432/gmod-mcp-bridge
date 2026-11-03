@@ -23,10 +23,10 @@ TOOLS = [
     {"name": "list_tool_packages", "description": "List tool packages...", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "request_tool_packages", "description": "Explain how to enable tool packages...", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "call_package_tool", "description": "Run one tool from an enabled package...", "inputSchema": {"type": "object", "properties": {"package": {"type": "string"}, "name": {"type": "string"}}}},
-    {"name": "list_directory", "description": "List files under $HOME...", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "read_file", "description": "Read a file's text...", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
-    {"name": "write_file", "description": "Write/create a file under $HOME...", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
-    {"name": "edit_file", "description": "Edit a file with search/replace...", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}}},
+    {"name": "list_directory", "description": "List files and folders under garrysmod/data (the DATA sandbox, the only writable location in Lua mode). Paths are relative to garrysmod/data; omit or use '.' for the root. Use maxDepth > 1 for a recursive tree.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "read_file", "description": "Read a file's text. Tries garrysmod/data (DATA) first, then the game's mounted files (GAME), then the Lua search path (LUA). GAME and LUA are read-only.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+    {"name": "write_file", "description": "Write or create a file under garrysmod/data (DATA), the only writable location in Lua mode. Creates parent directories and overwrites if the file exists.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
+    {"name": "edit_file", "description": "Edit a file in garrysmod/data (DATA) with exact search/replace. Replaces the first match unless replace_all is true. Fails if old_string is not found.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}}},
 ]
 
 VALID_TOOLS = {t["name"] for t in TOOLS}
